@@ -1,12 +1,12 @@
 name: Run cosign
-description: Cryptographically sign Docker images pushed to GHCR and DockerHub.
+description: Cryptographically sign Docker images pushed to GHCR and Docker Hub.
 
 inputs:
   ghcr-image:
-    description: Image name as pushed to the Github Container Registry.
+    description: Image name as pushed to the GitHub Container Registry.
     required: true
   dockerhub-image:
-    description: Image name as pushed to the Docker image registry.
+    description: Image name as pushed to Docker Hub.
     required: true
   digest:
     description: Digest of the pushed image.
@@ -20,6 +20,10 @@ runs:
 
     - name: Sign image with cosign
       shell: bash
+      env:
+        GHCR_IMAGE: ${{ inputs.ghcr-image }}
+        DOCKERHUB_IMAGE: ${{ inputs.dockerhub-image }}
+        DIGEST: ${{ inputs.digest }}
       run: |
-        cosign sign --yes --recursive ${{ inputs.ghcr-image }}@${{ inputs.digest }}
-        cosign sign --yes --recursive ${{ inputs.dockerhub-image }}@${{ digest.digest }}
+        cosign sign --yes --recursive "${GHCR_IMAGE}@${DIGEST}"
+        cosign sign --yes --recursive "${DOCKERHUB_IMAGE}@${DIGEST}"

@@ -12,11 +12,11 @@ runs:
       with:
         path: .
         format: cyclonedx-json
-        output-file: ${{ steps.plan.outputs.source-sbom-path }}
+        output-file: sbom-source.cyclonedx.json
         artifact-name: sbom-source.cyclonedx.json
         upload-artifact: true
 
 outputs:
   source-sbom:
-    description: Path to the source SBOM that was attested.
-    value: ${{ steps.plan.outputs.source-sbom-path }}
+    description: Path to the generated source SBOM.
+    value: sbom-source.cyclonedx.json
