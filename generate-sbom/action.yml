@@ -1,0 +1,22 @@
+name: Generate SBOM
+description: Generate Software Bill of Materials from source code.
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout sources
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Generate source SBOM
+      uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      with:
+        path: .
+        format: cyclonedx-json
+        output-file: ${{ steps.plan.outputs.source-sbom-path }}
+        artifact-name: sbom-source.cyclonedx.json
+        upload-artifact: true
+
+outputs:
+  source-sbom:
+    description: Path to the source SBOM that was attested.
+    value: ${{ steps.plan.outputs.source-sbom-path }}
