@@ -1,0 +1,32 @@
+name: Attach SBOM
+description: Attach Software Bill of Materials to images
+
+inputs:
+  ghcr-image:
+    description: Image name as pushed to the Github Container Registry.
+    required: true
+  dockerhub-image:
+    description: Image name as pushed to the Docker image registry.
+    required: true
+  digest:
+    description: Digest of the pushed image.
+    required: true
+
+runs:
+  using: composite
+  steps:
+      - name: Attach source SBOM attestation to image (GHCR)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ inputs.ghcr-image }}
+          subject-digest: ${{ inputs.digest }}
+          sbom-path: sbom/sbom-source.cyclonedx.json
+          push-to-registry: true
+
+      - name: Attach source SBOM attestation to image (Docker Hub)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ inputs.dockerhub-image }}
+          subject-digest: ${{ inputs.digest }}
+          sbom-path: sbom/sbom-source.cyclonedx.json
+          push-to-registry: true
