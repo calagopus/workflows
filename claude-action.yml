@@ -1,0 +1,289 @@
+name: Docker publish
+description: Build an image without credentials, log in, push it, attest its source SBOM and sign it with cosign.
+
+# Runs in the caller's job, so anything the caller prepared in the workspace
+# (for example prebuilt binaries in .docker/) is part of the build context.
+# This action never checks out: that would delete those files.
+#
+# Permissions the calling job needs:
+#   contents: read
+#   packages: write       push to GHCR
+#   id-token: write       Docker Hub OIDC login, cosign and attestations
+#   attestations: write   source SBOM attestation
+
+inputs:
+  image-name:
+    description: Image path without registry or tag. It is used on GHCR and on Docker Hub.
+    required: false
+    default: ${{ github.repository }}
+  image-tags:
+    description: Tags to publish (only the tag, not the image), separated by newlines, commas or spaces.
+    required: true
+  build-context:
+    description: Build context.
+    required: false
+    default: .
+  dockerfile:
+    description: Path to the Dockerfile, when it is not <build-context>/Dockerfile.
+    required: false
+    default: ""
+  platforms:
+    description: Platforms to build.
+    required: false
+    default: linux/amd64,linux/arm64,linux/riscv64,linux/ppc64le
+  build-args:
+    description: Build arguments, one per line.
+    required: false
+    default: ""
+  target-stage:
+    description: Dockerfile stage to build.
+    required: false
+    default: ""
+  labels:
+    description: Image labels, one per line.
+    required: false
+    default: ""
+  cache-from:
+    description: Buildx cache sources.
+    required: false
+    default: type=gha
+  cache-to:
+    description: Buildx cache destinations. Only the credential-free build writes to it.
+    required: false
+    default: type=gha,mode=max
+  image-sbom:
+    description: Value for the BuildKit SBOM attestation of the image contents, for example true or scan-stages=true.
+    required: false
+    default: "true"
+  setup-qemu:
+    description: Set up QEMU. Set to false for a build on a native runner.
+    required: false
+    default: "true"
+  push-image:
+    description: Log in, push, attest and sign. Set to false to only build, for example on pull requests.
+    required: false
+    default: "true"
+  attest-and-sign:
+    description: Attest the source SBOM and sign with cosign. Needs push-image.
+    required: false
+    default: "true"
+  source-sbom-path:
+    description: Path to an existing source SBOM. When empty, one is generated from the files tracked by git.
+    required: false
+    default: ""
+  ghcr-token:
+    description: Token for the GHCR login.
+    required: false
+    default: ${{ github.token }}
+  publish-to-dockerhub:
+    description: Also publish to Docker Hub. Fails when the two values below are missing, rather than silently skipping it.
+    required: false
+    default: "false"
+  dockerhub-username:
+    description: Docker Hub username. Pass secrets.DOCKERHUB_USERNAME.
+    required: false
+    default: ""
+  dockerhub-oidc-connection-id:
+    description: Docker Hub OIDC connection id. Pass secrets.DOCKERHUB_OIDC_CONNECTIONID.
+    required: false
+    default: ""
+
+outputs:
+  digest:
+    description: Digest of the pushed image. Empty when nothing was pushed.
+    value: ${{ steps.push.outputs.digest }}
+  tags:
+    description: Full image references that were built, one per line.
+    value: ${{ steps.plan.outputs.tags }}
+  source-sbom:
+    description: Path to the source SBOM that was attested. Empty when none was.
+    value: ${{ steps.plan.outputs.source-sbom-path }}
+
+runs:
+  using: composite
+  steps:
+    # Decides once what this run does, so later steps check a single flag.
+    # Runs before the build, so bad input fails without wasting a multi-platform build.
+    - name: Validate inputs and plan the run
+      id: plan
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        IMAGE_TAGS: ${{ inputs.image-tags }}
+        SOURCE_SBOM_PATH: ${{ inputs.source-sbom-path }}
+        PUBLISH_TO_DOCKERHUB: ${{ inputs.publish-to-dockerhub }}
+        DOCKERHUB_USERNAME: ${{ inputs.dockerhub-username }}
+        DOCKERHUB_OIDC_CONNECTION_ID: ${{ inputs.dockerhub-oidc-connection-id }}
+        LOGIN_TO_DOCKERHUB: ${{ inputs.push-image == 'true' && inputs.publish-to-dockerhub == 'true' }}
+        ATTEST_AND_SIGN: ${{ inputs.push-image == 'true' && inputs.attest-and-sign == 'true' }}
+        ATTEST_ON_DOCKERHUB: ${{ inputs.push-image == 'true' && inputs.attest-and-sign == 'true' && inputs.publish-to-dockerhub == 'true' }}
+      run: |
+        if [[ ! "$IMAGE_NAME" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]]; then
+          echo "::error::Invalid image-name: '$IMAGE_NAME'. Pass the path only, without registry or tag."
+          exit 1
+        fi
+
+        if [[ "$LOGIN_TO_DOCKERHUB" == "true" ]] \
+          && [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_OIDC_CONNECTION_ID" ]]; then
+          echo "::error::publish-to-dockerhub is true, but dockerhub-username or dockerhub-oidc-connection-id is empty."
+          exit 1
+        fi
+
+        images=("ghcr.io/$IMAGE_NAME")
+        [[ "$PUBLISH_TO_DOCKERHUB" == "true" ]] && images+=("docker.io/$IMAGE_NAME")
+
+        set -f
+        refs=()
+        for tag in ${IMAGE_TAGS//,/ }; do
+          if [[ ! "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Invalid tag: '$tag'"
+            exit 1
+          fi
+          for image in "${images[@]}"; do
+            refs+=("$image:$tag")
+          done
+        done
+        set +f
+
+        if [[ ${#refs[@]} -eq 0 ]]; then
+          echo "::error::No tags given."
+          exit 1
+        fi
+
+        {
+          echo "ghcr-image=ghcr.io/$IMAGE_NAME"
+          echo "dockerhub-image=docker.io/$IMAGE_NAME"
+          echo "images=${images[*]}"
+          echo "login-to-dockerhub=$LOGIN_TO_DOCKERHUB"
+          echo "attest-and-sign=$ATTEST_AND_SIGN"
+          echo "attest-on-dockerhub=$ATTEST_ON_DOCKERHUB"
+          echo "tags<<__TAGS__"
+          printf '%s\n' "${refs[@]}"
+          echo "__TAGS__"
+        } >> "$GITHUB_OUTPUT"
+
+        [[ "$ATTEST_AND_SIGN" == "true" ]] || exit 0
+
+        if [[ -n "$SOURCE_SBOM_PATH" ]]; then
+          if [[ ! -s "$SOURCE_SBOM_PATH" ]]; then
+            echo "::error::Source SBOM not found or empty: $SOURCE_SBOM_PATH"
+            exit 1
+          fi
+          echo "source-sbom-path=$SOURCE_SBOM_PATH" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Copies tracked files only, so binaries the caller prepared in the workspace
+        # don't end up in an SBOM that describes the source.
+        tree="$RUNNER_TEMP/source-sbom-tree"
+        mkdir -p "$tree"
+        git ls-files --recurse-submodules -z | tar --null -T - -cf - | tar -xf - -C "$tree"
+        {
+          echo "source-tree=$tree"
+          echo "source-sbom-path=$RUNNER_TEMP/sbom-source.cyclonedx.json"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Set up QEMU
+      if: inputs.setup-qemu == 'true'
+      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+    # Runs before any login, so code in the build can't reach registry credentials.
+    - name: Build image
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: ${{ inputs.build-context }}
+        file: ${{ inputs.dockerfile }}
+        platforms: ${{ inputs.platforms }}
+        target: ${{ inputs.target-stage }}
+        build-args: ${{ inputs.build-args }}
+        labels: ${{ inputs.labels }}
+        push: false
+        tags: ${{ steps.plan.outputs.tags }}
+        sbom: ${{ inputs.image-sbom }}
+        provenance: true
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - name: Log in to GHCR
+      if: inputs.push-image == 'true'
+      uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.ghcr-token }}
+
+    - name: Log in to Docker Hub
+      if: steps.plan.outputs.login-to-dockerhub == 'true'
+      uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+      env:
+        DOCKERHUB_OIDC_CONNECTIONID: ${{ inputs.dockerhub-oidc-connection-id }}
+
+    - name: Push image
+      id: push
+      if: inputs.push-image == 'true'
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: ${{ inputs.build-context }}
+        file: ${{ inputs.dockerfile }}
+        platforms: ${{ inputs.platforms }}
+        target: ${{ inputs.target-stage }}
+        build-args: ${{ inputs.build-args }}
+        labels: ${{ inputs.labels }}
+        push: true
+        tags: ${{ steps.plan.outputs.tags }}
+        sbom: ${{ inputs.image-sbom }}
+        provenance: true
+        cache-from: ${{ inputs.cache-from }}
+
+    - name: Generate source SBOM
+      if: steps.plan.outputs.source-tree != ''
+      uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+      with:
+        path: ${{ steps.plan.outputs.source-tree }}
+        format: cyclonedx-json
+        output-file: ${{ steps.plan.outputs.source-sbom-path }}
+        upload-artifact: false
+        upload-release-assets: false
+
+    - name: Attest source SBOM (GHCR)
+      if: steps.plan.outputs.attest-and-sign == 'true'
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-name: ${{ steps.plan.outputs.ghcr-image }}
+        subject-digest: ${{ steps.push.outputs.digest }}
+        sbom-path: ${{ steps.plan.outputs.source-sbom-path }}
+        push-to-registry: true
+
+    - name: Attest source SBOM (Docker Hub)
+      if: steps.plan.outputs.attest-on-dockerhub == 'true'
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-name: ${{ steps.plan.outputs.dockerhub-image }}
+        subject-digest: ${{ steps.push.outputs.digest }}
+        sbom-path: ${{ steps.plan.outputs.source-sbom-path }}
+        push-to-registry: true
+
+    - name: Install cosign
+      if: steps.plan.outputs.attest-and-sign == 'true'
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+    # Signs by digest, never by tag, so a tag moved in the meantime can't be signed by mistake.
+    - name: Sign image
+      if: steps.plan.outputs.attest-and-sign == 'true'
+      shell: bash
+      env:
+        DIGEST: ${{ steps.push.outputs.digest }}
+        IMAGES: ${{ steps.plan.outputs.images }}
+      run: |
+        if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          echo "::error::Unexpected image digest: '$DIGEST'"
+          exit 1
+        fi
+        for image in $IMAGES; do
+          cosign sign --yes --recursive "$image@$DIGEST"
+        done

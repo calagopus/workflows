@@ -1,0 +1,19 @@
+#name: Docker Build & Publish
+#description: Reusable GitHub Actions Workflow for Docker image publishing.
+#
+#inputs:
+#  
+#
+#runs:
+#  using: composite
+#  steps:
+#    - uses: 
+#
+
+# 1. Generate SBOM
+# 2. Build the image
+# 3. Login to GHCR/DockerHub
+# 4. Push the image
+# 5. Cosign
+# - Multiarch images?
+# - Heavy merging
