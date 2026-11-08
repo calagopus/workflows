@@ -33,7 +33,6 @@ permissions:
   packages: write
   id-token: write
   attestations: write
-  artifact-metadata: write
 
 env:
   PROJECT_NAME: ${{ github.event.repository.name }}
@@ -59,8 +58,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: ${{ env.PROJECT_NAME }}
 
       - name: Download source SBOM
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -98,40 +95,46 @@ jobs:
 
       - name: Determine tags
         id: determine-tags
-        uses: calagopus/workflows/docker/determine-tags@87d6290dfeb3b976128700bad400422c82f0503f
+        uses: calagopus/workflows/docker/determine-tags@9f40aabccb6f7048b185487ca6dd6b1a02ac0490
         with:
           image-tag: ${{ inputs.image-tag }}
-          tag-variant: ${{ matrix.tag-variant }}
-          stable-tag: ${{ matrix.stable-tag }}
+          tag-variant: ${{ matrix.tag_variant }}
+          stable-tag: ${{ matrix.stable_tag }}
           tag-latest: ${{ inputs.tag-latest }}
           tag-latest-pre: ${{ inputs.tag-latest-pre }}
+          ghcr-image: ${{ env.GHCR_IMAGE }}
+          dockerhub-image: ${{ env.DOCKERHUB_IMAGE }}
 
       - name: Build multi-arch image
-        uses: calagopus/workflows/docker/build-image@87d6290dfeb3b976128700bad400422c82f0503f
+        uses: calagopus/workflows/docker/build-image@9f40aabccb6f7048b185487ca6dd6b1a02ac0490
         with:
           dockerfile: ./docker/${{ matrix.dockerfile }}
           image-tags: ${{ steps.determine-tags.outputs.image-tags }}
 
       - name: Login to container registries
-        uses: calagopus/workflows/docker/registry-login@87d6290dfeb3b976128700bad400422c82f0503f
+        uses: calagopus/workflows/docker/registry-login@9f40aabccb6f7048b185487ca6dd6b1a02ac0490
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-oidc-connection-id: ${{ secrets.DOCKERHUB_OIDC_CONNECTIONID }}
 
       - name: Push multi-arch image
         id: push-image
-        uses: calagopus/workflows/docker/build-image@87d6290dfeb3b976128700bad400422c82f0503f
+        uses: calagopus/workflows/docker/build-image@9f40aabccb6f7048b185487ca6dd6b1a02ac0490
         with:
           dockerfile: ./docker/${{ matrix.dockerfile }}
           image-tags: ${{ steps.determine-tags.outputs.image-tags }}
           push-image: true
 
       - name: Attach SBOM
-        uses: calagopus/workflows/docker/attach-sbom@87d6290dfeb3b976128700bad400422c82f0503f
+        uses: calagopus/workflows/docker/attach-sbom@9f40aabccb6f7048b185487ca6dd6b1a02ac0490
         with:
           ghcr-image: ${{ env.GHCR_IMAGE }}
           dockerhub-image: ${{ env.DOCKERHUB_IMAGE }}
           digest: ${{ steps.push-image.outputs.digest }}
 
       - name: Run cosign
-        uses: calagopus/workflows/cosign@87d6290dfeb3b976128700bad400422c82f0503f
+        uses: calagopus/workflows/cosign@9f40aabccb6f7048b185487ca6dd6b1a02ac0490
         with:
           ghcr-image: ${{ env.GHCR_IMAGE }}
           dockerhub-image: ${{ env.DOCKERHUB_IMAGE }}
