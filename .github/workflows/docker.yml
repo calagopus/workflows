@@ -3,46 +3,42 @@ name: Build docker images
 on:
   workflow_call:
     inputs:
-        image_tag:
+        image-tag:
           description: Primary image tag (e.g. nightly, next, or a release version)
           required: true
           type: string
-        tag_latest:
+        tag-latest:
           description: Also move the stable tags (latest, aio, heavy, heavy-aio)
           required: false
           type: boolean
           default: false
-        tag_latest_pre:
+        tag-latest-pre:
           description: Also move the pre-release tags (latest-pre, aio-pre, ...)
           required: false
           type: boolean
           default: false
-        binary_name:
+        binary-name:
           required: true
           description: The name of the panel binary
           type: string
           default: panel-rs
-        aio_binary_name:
+        aio-binary-name:
           required: true
           description: The name of the aio panel binary
           type: string
           default: panel-rs-aio
-    outputs:
-      digests:
-        description: 'JSON map of variant -> digest, e.g. {"main":"sha256:...","aio":"sha256:..."}'
-        value: ${{ jobs.collect.outputs.digests }}
-      tags:
-        description: 'JSON map of variant -> comma-separated tags'
-        value: ${{ jobs.collect.outputs.tags }}
 
 permissions:
   contents: read
   packages: write
   id-token: write
   attestations: write
+  artifact-metadata: write
 
 env:
   PROJECT_NAME: ${{ github.event.repository.name }}
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+  DOCKERHUB_IMAGE: docker.io/${{ github.repository }}
 
 jobs:
   create-image:
@@ -75,7 +71,7 @@ jobs:
       - name: Download binaries
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: ${{ inputs.binary_name }}-*-linux
+          pattern: ${{ inputs.binary-name }}-*-linux
           path: dist
 
       - name: Set up QEMU
@@ -86,8 +82,8 @@ jobs:
 
       - name: Prepare binaries
         env:
-          BIN_NAME: ${{ inputs.binary_name }}
-          AIO_BIN_NAME: ${{ inputs.aio_binary_name }}
+          BIN_NAME: ${{ inputs.binary-name }}
+          AIO_BIN_NAME: ${{ inputs.aio-binary-name }}
         run: |
           for pair in x86_64:amd64 aarch64:arm64 riscv64:riscv64 ppc64le:ppc64le; do
             build="${pair%%:*}-linux"
@@ -101,95 +97,42 @@ jobs:
           chmod +x .docker/*/*
 
       - name: Determine tags
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
-          TAG_VARIANT: ${{ matrix.tag_variant }}
-          STABLE_TAG: ${{ matrix.stable_tag }}
-          TAG_LATEST: ${{ inputs.tag_latest }}
-          TAG_LATEST_PRE: ${{ inputs.tag_latest_pre }}
-          GHCR_IMAGE: ghcr.io/${{ github.event.repository }}
-          DOCKERHUB_IMAGE: docker.io/${{ github.event.repository }}
-        run: |
-          SUFFIXES=("${IMAGE_TAG}${TAG_VARIANT:+-$TAG_VARIANT}")
-          [[ "$TAG_LATEST_PRE" == "true" ]] && SUFFIXES+=("${STABLE_TAG}-pre")
-          [[ "$TAG_LATEST" == "true" ]] && SUFFIXES+=("$STABLE_TAG")
-
-          IMAGE_TAGS=""
-          for t in "${SUFFIXES[@]}"; do
-            # IMAGE_TAGS="${IMAGE_TAGS}${IMAGE_TAGS:+,}${GHCR_IMAGE}:${t},${DOCKERHUB_IMAGE}:${t}"
-            IMAGE_TAGS="${IMAGE_TAGS}${IMAGE_TAGS:+,}${GHCR_IMAGE}:${t}"
-          done
-          echo "IMAGE_TAGS=$IMAGE_TAGS" >> $GITHUB_ENV
+        id: determine-tags
+        uses: calagopus/workflows/docker/determine-tags@87d6290dfeb3b976128700bad400422c82f0503f
+        with:
+          image-tag: ${{ inputs.image-tag }}
+          tag-variant: ${{ matrix.tag-variant }}
+          stable-tag: ${{ matrix.stable-tag }}
+          tag-latest: ${{ inputs.tag-latest }}
+          tag-latest-pre: ${{ inputs.tag-latest-pre }}
 
       - name: Build multi-arch image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: calagopus/workflows/docker/build-image@87d6290dfeb3b976128700bad400422c82f0503f
         with:
-          context: .
-          file: ./docker/${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64,linux/riscv64,linux/ppc64le
-          push: false
-          tags: ${{ env.IMAGE_TAGS }}
-          sbom: true
-          provenance: true
+          dockerfile: ./docker/${{ matrix.dockerfile }}
+          image-tags: ${{ steps.determine-tags.outputs.image-tags }}
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # - name: Login to Docker Hub
-      #   uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-      #   with:
-      #     username: ${{ secrets.DOCKERHUB_USERNAME }}
-      #   env:
-      #     DOCKERHUB_OIDC_CONNECTIONID: ${{ secrets.DOCKERHUB_OIDC_CONNECTIONID }}
+      - name: Login to container registries
+        uses: calagopus/workflows/docker/registry-login@87d6290dfeb3b976128700bad400422c82f0503f
 
       - name: Push multi-arch image
-        id: build
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: push-image
+        uses: calagopus/workflows/docker/build-image@87d6290dfeb3b976128700bad400422c82f0503f
         with:
-          context: .
-          file: ./docker/${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64,linux/riscv64,linux/ppc64le
-          push: true
-          tags: ${{ env.IMAGE_TAGS }}
-          sbom: true
-          provenance: true
+          dockerfile: ./docker/${{ matrix.dockerfile }}
+          image-tags: ${{ steps.determine-tags.outputs.image-tags }}
+          push-image: true
 
-      - name: Record result
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-          VARIANT: ${{ matrix.variant }}
-        run: |
-          mkdir -p result
-          jq -n --arg v "$VARIANT" --arg d "$DIGEST" --arg t "$IMAGE_TAGS" \
-            '{($v): {digest: $d, tags: $t}}' > "result/$VARIANT.json"
-
-      - name: Upload result
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - name: Attach SBOM
+        uses: calagopus/workflows/docker/attach-sbom@87d6290dfeb3b976128700bad400422c82f0503f
         with:
-          name: image-result-${{ matrix.variant }}
-          path: result/${{ matrix.variant }}.json
-          retention-days: 1
-  
-  collect:
-    needs: create-image
-    runs-on: ubuntu-24.04
-    outputs:
-      digests: ${{ steps.merge.outputs.digests }}
-      tags: ${{ steps.merge.outputs.tags }}
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+          ghcr-image: ${{ env.GHCR_IMAGE }}
+          dockerhub-image: ${{ env.DOCKERHUB_IMAGE }}
+          digest: ${{ steps.push-image.outputs.digest }}
+
+      - name: Run cosign
+        uses: calagopus/workflows/cosign@87d6290dfeb3b976128700bad400422c82f0503f
         with:
-          pattern: image-result-*
-          path: result
-          merge-multiple: true
-
-      - id: merge
-        run: |
-          merged=$(jq -s 'add' result/*.json)
-          echo "digests=$(jq -c 'map_values(.digest)' <<<"$merged")" >> "$GITHUB_OUTPUT"
-          echo "tags=$(jq -c 'map_values(.tags)' <<<"$merged")" >> "$GITHUB_OUTPUT"
-
+          ghcr-image: ${{ env.GHCR_IMAGE }}
+          dockerhub-image: ${{ env.DOCKERHUB_IMAGE }}
+          digest: ${{ steps.push-image.outputs.digest }}
